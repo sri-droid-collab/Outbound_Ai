@@ -43,6 +43,15 @@ class Settings(BaseSettings):
     lead_research_fetch_timeout_seconds: float = 10.0
     lead_research_max_pages: int = 5
     lead_research_user_agent: str = "OutboundAI-LeadResearch/1.0 (+business research; respects robots.txt)"
+    # Wikimedia rejects requests whose User-Agent has no way to reach the operator, so the
+    # Wikidata lookup stays off until this is set (an email or a URL you are happy to share).
+    lead_research_contact: str = ""
+    lead_research_collector_timeout_seconds: float = 15.0
+    lead_research_news_cache_hours: int = 12
+    lead_research_registry_cache_days: int = 7
+    # GDELT allows one request per 5 seconds and returned 429 on first contact when tried,
+    # so it is an opt-in extra on top of Google News.
+    lead_research_gdelt_enabled: bool = False
 
     jwt_secret_key: str = "change-this-secret-key"
     jwt_algorithm: str = "HS256"

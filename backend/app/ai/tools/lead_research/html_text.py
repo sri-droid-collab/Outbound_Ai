@@ -71,7 +71,10 @@ class _Extractor(HTMLParser):
             self._in_title = False
         elif tag == "a" and self._anchor_href is not None:
             url, _ = urldefrag(urljoin(self._base, self._anchor_href))
-            self.links.append((url, " ".join("".join(self._anchor_text).split())))
+            # One line per text node: a card link built from sibling <span>s keeps its fields
+            # (code, title, location, type) apart instead of gluing them into one string.
+            pieces = (" ".join(piece.split()) for piece in self._anchor_text)
+            self.links.append((url, "\n".join(p for p in pieces if p)))
             self._anchor_href = None
         if tag in _BLOCK_TAGS:
             self.text_parts.append("\n")

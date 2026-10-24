@@ -676,9 +676,31 @@ from the curated table in the script. It copies project facts only, never names 
 
 ### Lead research — `/lead-research`
 
-Researches a lead's company from its public website and DNS email records, then stores a call-ready
-brief (summary, likely pain points with sources, opening line, questions). Runs as a background task,
-so closing the panel never stops it. All endpoints require a JWT.
+Researches a lead's company from public sources, then stores a call-ready brief (summary, likely pain
+points with sources, opening line, questions). Runs as a background task, so closing the panel never
+stops it. All endpoints require a JWT.
+
+Sources, gathered in parallel and each time-boxed (a slow or failing source becomes a gap in the brief,
+never a failed run - only an unreadable website fails it):
+
+| Source | What it gives | Notes |
+|--------|---------------|-------|
+| Website (up to 5 pages) | what they do, careers page | honours `robots.txt`; a careers/jobs page is always included if linked |
+| Email DNS | mail provider, SPF, DMARC policy | |
+| Google News RSS | recent headlines, tagged funding / acquisition / expansion / leadership / security / layoffs | only headlines naming the company; cached 12 h |
+| Wikidata | founded, headquarters, industry, headcount | only when its official website is the lead's own domain; needs `LEAD_RESEARCH_CONTACT`; cached 7 days |
+| Technology detection | CMS, frameworks, analytics, hosting, server versions | from homepage HTML and headers; says what revealed each |
+| Hiring | IT-related open roles | from careers pages; reports external job boards it can't read |
+| GDELT (optional) | more news | off by default (`LEAD_RESEARCH_GDELT_ENABLED`); rate-limits to 1 request / 5 s |
+
+`merge_validate` then combines these, keeps every fact's source, lists what couldn't be found, and flags
+disagreements (e.g. the lead sheet says 10,001+ employees but Wikidata says 4,907) so the brief doesn't
+state either as fact. Every claim in the brief must cite one of the collected sources or it is dropped.
+Per-source results are cached in the `research_cache` collection (Mongo TTL index), and "nothing found"
+is cached too, for a shorter time.
+
+Static HTML only: sites that build their navigation or job lists with JavaScript show less (for example
+no careers page, few detected technologies).
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|

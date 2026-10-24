@@ -50,3 +50,19 @@ def test_tolerates_broken_markup():
     page = extract_page("<div><p>Unclosed <b>bold <a href='/x'>link</div>", "https://acme.com/")
 
     assert "Unclosed" in page.text
+
+
+def test_a_links_text_nodes_stay_on_separate_lines():
+    page = extract_page(
+        '<a href="/careers/1"><span>JB001</span><span>Data  Engineer</span><span>Remote</span></a>',
+        "https://acme.com/",
+    )
+
+    assert page.links == [("https://acme.com/careers/1", "JB001\nData Engineer\nRemote")]
+
+
+def test_inline_spans_still_glue_in_the_pages_flat_text():
+    # This is why card titles must come from the link's pieces, not the page text.
+    page = extract_page("<a href='/x'><span>JB001</span><span>Data Engineer</span></a>", "https://acme.com/")
+
+    assert page.text == "JB001Data Engineer"

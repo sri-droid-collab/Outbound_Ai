@@ -1,12 +1,17 @@
 import { useEffect, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { X, Loader2, CheckCircle2, Circle, AlertCircle, RotateCw, Globe, FileSearch, Clock } from 'lucide-react';
+import { X, Loader2, CheckCircle2, Circle, AlertCircle, MinusCircle, RotateCw, Globe, FileSearch, Clock } from 'lucide-react';
 import { useLeadResearch, ACTIVE_STATUSES } from '../hooks/useLeadResearch';
 import BriefView from './BriefView';
 
 const STEP_LABELS = {
   fetch_site: 'Reading their website',
   check_email_setup: 'Checking email setup',
+  find_news: 'Looking for recent news',
+  check_registry: 'Checking company records',
+  detect_tech: 'Detecting their technology',
+  find_jobs: 'Looking at their hiring',
+  merge_findings: 'Cross-checking the findings',
   match_projects: 'Matching our past projects',
   write_brief: 'Writing the brief',
 };
@@ -15,6 +20,7 @@ function StepIcon({ status }) {
   if (status === 'done') return <CheckCircle2 className="w-4 h-4 text-emerald-500" />;
   if (status === 'running') return <Loader2 className="w-4 h-4 text-blue-500 animate-spin" />;
   if (status === 'failed') return <AlertCircle className="w-4 h-4 text-red-500" />;
+  if (status === 'skipped') return <MinusCircle className="w-4 h-4 text-amber-400" />;
   return <Circle className="w-4 h-4 text-gray-300" />;
 }
 
@@ -26,6 +32,8 @@ function Progress({ steps }) {
         {steps.map((s) => (
           <li key={s.name} className="flex items-center gap-2.5 text-[13.5px] text-gray-700">
             <StepIcon status={s.status} />{STEP_LABELS[s.name] || s.name}
+            {s.status === 'skipped' && <span className="text-[11.5px] text-gray-400">skipped</span>}
+            {s.status === 'failed' && <span className="text-[11.5px] text-gray-400">unavailable - continuing without it</span>}
           </li>
         ))}
       </ul>
@@ -191,7 +199,7 @@ export default function ResearchPanel({ contact, onClose, onSaveWebsite, onStart
                       This brief is {ageInDays(research.completed_at)} days old. Re-run it before an important call.
                     </div>
                   )}
-                  <BriefView brief={research.brief} sources={research.sources} posture={research.posture} />
+                  <BriefView brief={research.brief} sources={research.sources} posture={research.posture} findings={research.findings} />
                   {research.completed_at && (
                     <p className="text-[11.5px] text-gray-300 text-right">
                       Generated {new Date(research.completed_at).toLocaleString()}

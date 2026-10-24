@@ -7,7 +7,7 @@ an exception - a flaky site must never stop a research run.
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlsplit
 from urllib.robotparser import RobotFileParser
 
@@ -27,6 +27,7 @@ class FetchResult:
     url: str
     final_url: str = ""
     text: str = ""
+    headers: dict[str, str] = field(default_factory=dict)  # lowercased names
     error: str = ""  # short code, safe to show: blocked_by_robots, unsafe_address, timeout, ...
 
     @property
@@ -80,11 +81,11 @@ class PageFetcher:
             return FetchResult(url, error="network_error")
         if isinstance(body, str):
             return FetchResult(url, error=body)
-        text, final_url = body
-        return FetchResult(url, final_url=final_url, text=text)
+        text, final_url, headers = body
+        return FetchResult(url, final_url=final_url, text=text, headers=headers)
 
-    async def _get(self, url: str, accept: tuple[str, ...]) -> tuple[str, str] | str:
-        """Returns (text, final_url) or a short error code string."""
+    async def _get(self, url: str, accept: tuple[str, ...]) -> tuple[str, str, dict[str, str]] | str:
+        """Returns (text, final_url, response headers) or a short error code string."""
         current = url
         for _ in range(MAX_REDIRECTS + 1):
             await self._url_check(current)
@@ -108,10 +109,11 @@ class PageFetcher:
                     if size >= MAX_BYTES:
                         break  # a truncated page still has its useful text near the top
                 raw = b"".join(chunks)[:MAX_BYTES]
+                headers = {k.lower(): v for k, v in resp.headers.items()}
                 try:
-                    return raw.decode(resp.charset_encoding or "utf-8", errors="replace"), current
+                    return raw.decode(resp.charset_encoding or "utf-8", errors="replace"), current, headers
                 except LookupError:
-                    return raw.decode("utf-8", errors="replace"), current
+                    return raw.decode("utf-8", errors="replace"), current, headers
         return "too_many_redirects"
 
     async def _allowed_by_robots(self, url: str) -> bool:

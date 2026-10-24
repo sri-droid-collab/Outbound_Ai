@@ -4,10 +4,11 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.ai.schemas.lead_research import LeadBrief
+from app.ai.schemas.lead_research import LeadBrief, NewsItem, RegistryFacts
 from app.ai.tools.lead_research.dns_posture import DnsPosture
+from app.ai.tools.lead_research.public_api import SourceUnavailable
 from app.ai.tools.lead_research.site_crawler import CrawledPage, CrawlResult
-from app.domain.lead_research import service
+from app.domain.lead_research import collectors, service
 from app.repositories.lead_research_repo import ACTIVE_STATUSES
 
 CONTACT_ID = "507f1f77bcf86cd799439011"
@@ -71,6 +72,30 @@ class FakeFetcher:
         return None
 
 
+class FakePublicApi(FakeFetcher):
+    """Stands in for PublicApiClient; it records how it was built (user agent, allowed hosts)."""
+
+    built: list[dict] = []
+
+    def __init__(self, **kwargs):
+        FakePublicApi.built.append(kwargs)
+
+
+class FakeCache:
+    def __init__(self):
+        self.store: dict[tuple[str, str], dict] = {}
+
+    async def get(self, source, key):
+        return self.store.get((source, key))
+
+    async def put(self, source, key, payload, ttl_seconds):
+        self.store[(source, key)] = payload
+
+
+def _news(headline="Acme Robotics raises Series B", url="https://news.test/acme-b"):
+    return NewsItem(headline=headline, url=url, published_at="2026-03-11", tags=["funding"])
+
+
 def _page(url="https://acme.com/", text="We build warehouse robots."):
     return CrawledPage(url=url, title="Acme", description="Robots", text=text, fetched_at=datetime.utcnow())
 
@@ -99,12 +124,25 @@ class Harness:
         self.brief_delay = 0.0
         self.client_projects = None
         self.live_projects = None
+        self.news_items = [_news()]
+        self.news_error: Exception | None = None
+        self.news_delay = 0.0
+        self.news_searches = 0
+        self.crawl_delay = 0.0
+        self.registry_facts: RegistryFacts | None = None
+        self.registry_lookups = 0
+        self.cache = FakeCache()
+        FakePublicApi.built = []
 
         monkeypatch.setattr(service, "lead_research_repo", self.repo)
         monkeypatch.setattr(service, "contacts_repo", FakeContactsRepo({CONTACT_ID: self.contact}))
         monkeypatch.setattr(service, "PageFetcher", FakeFetcher)
-        monkeypatch.setattr(service, "crawl_site", self._crawl)
-        monkeypatch.setattr(service, "lookup_posture", self._posture)
+        monkeypatch.setattr(service, "PublicApiClient", FakePublicApi)
+        monkeypatch.setattr(service, "source_cache_repo", self.cache)
+        monkeypatch.setattr(collectors, "crawl_site", self._crawl)
+        monkeypatch.setattr(collectors, "lookup_posture", self._posture)
+        monkeypatch.setattr(collectors, "search_google_news", self._news_search)
+        monkeypatch.setattr(collectors, "lookup_wikidata", self._wikidata)
         monkeypatch.setattr(service, "generate_brief", self._generate)
         monkeypatch.setattr(service, "get_relevant_projects_for_contact", self._client_projects)
         monkeypatch.setattr(service, "match_projects_from_description", self._live_projects)
@@ -118,13 +156,37 @@ class Harness:
                 lead_research_fetch_timeout_seconds=1.0,
                 lead_research_max_pages=3,
                 lead_research_user_agent="OutboundAI-LeadResearch/1.0",
+                lead_research_collector_timeout_seconds=1.0,
+                lead_research_news_cache_hours=12,
+                lead_research_registry_cache_days=7,
+                lead_research_gdelt_enabled=False,
+                lead_research_contact="",
             ),
         )
         service._slots = None
         service._background_tasks.clear()
 
+    def configure(self, monkeypatch, **overrides):
+        """Re-patch settings with some values changed."""
+        base = service.get_settings()
+        monkeypatch.setattr(service, "get_settings", lambda: SimpleNamespace(**{**vars(base), **overrides}))
+
+    async def _news_search(self, api, company):
+        self.news_searches += 1
+        if self.news_delay:
+            await asyncio.sleep(self.news_delay)
+        if self.news_error:
+            raise self.news_error
+        return list(self.news_items)
+
+    async def _wikidata(self, api, company, domain):
+        self.registry_lookups += 1
+        return self.registry_facts
+
     async def _crawl(self, website, fetcher, max_pages):
         self.crawls += 1
+        if self.crawl_delay:
+            await asyncio.sleep(self.crawl_delay)
         return self.crawl_result
 
     async def _posture(self, domain):
@@ -189,10 +251,21 @@ async def test_happy_path_runs_in_background_and_stores_the_brief(harness):
     assert doc["brief"]["company_summary"] == "Acme builds robots."
     assert doc["sources"][0]["url"] == "https://acme.com/"
     assert doc["posture"]["email_provider"] == "Google Workspace"
-    assert [s["status"] for s in doc["steps"]] == ["done"] * 4
+    assert [s["name"] for s in doc["steps"]] == list(service.STEP_ORDER)
+    assert {s["name"]: s["status"] for s in doc["steps"]} == {
+        **{name: "done" for name in service.STEP_ORDER},
+        "check_registry": "skipped",  # no LEAD_RESEARCH_CONTACT configured
+    }
     assert doc["is_stale"] is False
-    # collector gaps and the model's own gaps are merged, without duplicates
-    assert doc["brief"]["gaps"] == ["/careers could not be read (timeout)", "Headcount unknown"]
+    assert [n["headline"] for n in doc["findings"]["news"]] == ["Acme Robotics raises Series B"]
+    # crawl gaps, then merge_validate's gaps, then the model's own - without duplicates
+    assert doc["brief"]["gaps"] == [
+        "/careers could not be read (timeout)",
+        "Company facts (Wikidata): not checked (set LEAD_RESEARCH_CONTACT to enable the Wikidata lookup)",
+        "Technology detection: nothing found (no recognisable technology signals)",
+        "Hiring: nothing found (no careers page among the pages read)",
+        "Headcount unknown",
+    ]
 
 
 async def test_second_click_while_running_does_not_start_another_run(harness):
@@ -291,18 +364,7 @@ async def test_unexpected_error_is_generic_and_leaks_nothing(harness):
 
 async def test_run_that_exceeds_the_job_timeout_is_stopped(harness, monkeypatch):
     harness.brief_delay = 5
-    monkeypatch.setattr(
-        service,
-        "get_settings",
-        lambda: SimpleNamespace(
-            lead_research_max_concurrent=2,
-            lead_research_cache_days=7,
-            lead_research_job_timeout_seconds=0.05,
-            lead_research_fetch_timeout_seconds=1.0,
-            lead_research_max_pages=3,
-            lead_research_user_agent="OutboundAI-LeadResearch/1.0",
-        ),
-    )
+    harness.configure(monkeypatch, lead_research_job_timeout_seconds=0.05)
 
     await service.start_research(CONTACT_ID)
     await harness.finish()
@@ -373,15 +435,162 @@ async def test_get_research_for_unresearched_contact_is_none(harness):
     assert await service.get_research(CONTACT_ID) is None
 
 
-@pytest.mark.parametrize(
-    "code, phrase",
-    [
-        ("host_not_found", "that website address doesn't exist"),
-        ("blocked_by_robots", "asks automated tools not to read it"),
-        ("timeout", "took too long to respond"),
-        ("http_404", "the site returned an error (404)"),
-        ("something_new", "no pages were readable"),
-    ],
-)
-def test_fetch_error_codes_become_plain_language(code, phrase):
-    assert phrase in service._fetch_error_reason(code)
+# ---- v1: fan-out collectors, merge_validate, cache
+
+
+def _steps(doc):
+    return {s["name"]: s["status"] for s in doc["steps"]}
+
+
+async def test_a_failing_source_becomes_a_gap_and_a_failed_step_but_the_run_succeeds(harness):
+    harness.news_error = SourceUnavailable("rate_limited")
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    assert doc["status"] == "done"
+    assert _steps(doc)["find_news"] == "failed" and _steps(doc)["fetch_site"] == "done"
+    assert "News: could not be retrieved (unavailable (rate_limited))" in doc["brief"]["gaps"]
+    news = next(c for c in doc["findings"]["coverage"] if c["source"] == "news")
+    assert news["status"] == "failed" and doc["findings"]["news"] == []
+
+
+async def test_a_slow_source_is_cut_off_without_failing_the_run(harness, monkeypatch):
+    harness.news_delay = 5
+    harness.configure(monkeypatch, lead_research_collector_timeout_seconds=0.05)
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    assert doc["status"] == "done" and _steps(doc)["find_news"] == "failed"
+    news = next(c for c in doc["findings"]["coverage"] if c["source"] == "news")
+    assert news["note"] == "timed out"
+
+
+async def test_an_unexpected_collector_error_is_contained(harness):
+    harness.news_error = ValueError("secret feed content")
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    assert doc["status"] == "done"
+    assert "secret" not in str(doc["findings"]) and "secret" not in doc["error"]
+
+
+async def test_collectors_run_side_by_side_not_one_after_another(harness):
+    harness.crawl_delay = 0.4
+    harness.news_delay = 0.4
+
+    started = asyncio.get_running_loop().time()
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    elapsed = asyncio.get_running_loop().time() - started
+
+    assert (await service.get_research(CONTACT_ID))["status"] == "done"
+    assert elapsed < 0.7  # sequential would take at least 0.8
+
+
+async def test_tech_and_hiring_signals_are_read_from_the_crawl(harness):
+    careers = CrawledPage(
+        url="https://acme.com/careers",
+        title="Careers",
+        description="",
+        text="Senior Backend Engineer\nOffice Manager",
+        fetched_at=datetime.utcnow(),
+    )
+    harness.crawl_result = CrawlResult(
+        pages=[_page(), careers],
+        home_html='<link rel="stylesheet" href="/wp-content/a.css">',
+        home_headers={"server": "nginx/1.18.0", "cf-ray": "x"},
+    )
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    names = {t["name"] for t in doc["findings"]["tech"]}
+    assert {"WordPress", "nginx", "Cloudflare"} <= names
+    assert doc["findings"]["jobs"]["it_roles"] == 1
+    assert _steps(doc)["detect_tech"] == "done" and _steps(doc)["find_jobs"] == "done"
+
+
+async def test_findings_and_citable_sources_reach_the_brief_prompt(harness):
+    harness.crawl_result = CrawlResult(pages=[_page()], home_html='<link href="/wp-content/a.css">')
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+
+    evidence = harness.evidence
+    assert [n.headline for n in evidence.findings.news] == ["Acme Robotics raises Series B"]
+    assert {"https://news.test/acme-b", "https://acme.com/", "tech:acme.com"} <= evidence.allowed_sources
+
+
+async def test_wikidata_is_only_consulted_once_a_contact_is_configured(harness, monkeypatch):
+    harness.registry_facts = RegistryFacts(name="Acme", url="https://www.wikidata.org/wiki/Q1", employees=100)
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    assert harness.registry_lookups == 0
+    assert "@" not in FakePublicApi.built[0]["user_agent"]  # nothing personal is sent unless configured
+
+    harness.configure(monkeypatch, lead_research_contact="ops@example.test")
+    await service.start_research(CONTACT_ID, force=True)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    assert harness.registry_lookups == 1
+    assert doc["findings"]["registry"]["employees"] == 100 and _steps(doc)["check_registry"] == "done"
+    assert "ops@example.test" in FakePublicApi.built[-1]["user_agent"]  # Wikimedia needs a way to reach us
+
+
+async def test_the_public_api_client_can_only_reach_the_known_hosts(harness):
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+
+    assert FakePublicApi.built[0]["allowed_hosts"] == {
+        "news.google.com",
+        "api.gdeltproject.org",
+        "www.wikidata.org",
+    }
+
+
+async def test_news_is_cached_between_runs(harness):
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    await service.start_research(CONTACT_ID, force=True)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    assert harness.news_searches == 1
+    news = next(c for c in doc["findings"]["coverage"] if c["source"] == "news")
+    assert news["status"] == "cached" and len(doc["findings"]["news"]) == 1
+
+
+async def test_a_headcount_conflict_is_flagged_and_passed_to_the_model(harness, monkeypatch):
+    harness.contact["lead"] = {"employees_size": "5,001-10,000 employees"}
+    harness.registry_facts = RegistryFacts(
+        name="Acme", url="https://www.wikidata.org/wiki/Q1", employees=1100
+    )
+    harness.configure(monkeypatch, lead_research_contact="ops@example.test")
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    (conflict,) = doc["findings"]["conflicts"]
+    assert "5,001-10,000" in conflict and "1,100" in conflict
+    assert harness.evidence.findings.conflicts == [conflict]
+
+
+async def test_an_unreadable_site_still_fails_the_run_even_if_other_sources_worked(harness):
+    harness.crawl_result = CrawlResult(pages=[], home_error="blocked_by_robots")
+
+    await service.start_research(CONTACT_ID)
+    await harness.finish()
+    doc = await service.get_research(CONTACT_ID)
+
+    assert doc["status"] == "failed" and "asks automated tools not to read it" in doc["error"]
+    assert harness.briefs == 0 and _steps(doc)["fetch_site"] == "failed"
