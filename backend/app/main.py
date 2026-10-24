@@ -12,8 +12,20 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from app.config import get_settings
 from app.core.security import hash_password
 from app.database import ensure_indexes
+from app.domain.lead_research.service import recover_interrupted_runs
 from app.repositories.users_repo import users_repo
-from app.routers import auth, calls, clients, contacts, media_stream, projects, twilio_numbers, users, ws
+from app.routers import (
+    auth,
+    calls,
+    clients,
+    contacts,
+    lead_research,
+    media_stream,
+    projects,
+    twilio_numbers,
+    users,
+    ws,
+)
 
 logger = logging.getLogger("outbound")
 logging.basicConfig(
@@ -73,6 +85,7 @@ app.include_router(ws.router)
 app.include_router(media_stream.router)
 app.include_router(clients.router)
 app.include_router(projects.router)
+app.include_router(lead_research.router)
 
 
 async def ensure_bootstrap_admin():
@@ -102,6 +115,7 @@ async def ensure_bootstrap_admin():
 async def startup():
     await ensure_indexes()
     await ensure_bootstrap_admin()
+    await recover_interrupted_runs()
 
 
 @app.get("/health")

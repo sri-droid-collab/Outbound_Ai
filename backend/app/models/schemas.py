@@ -1,7 +1,12 @@
-from pydantic import BaseModel, Field
-from typing import Any, Literal, Optional
+from pydantic import BaseModel, Field, StringConstraints
+from typing import Annotated, Any, Literal, Optional
 from datetime import datetime
 from enum import Enum
+
+from app.ai.schemas.lead_research import LeadBrief
+
+ShortText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
+UrlText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
 
 
 class ContactStatus(str, Enum):
@@ -11,13 +16,28 @@ class ContactStatus(str, Enum):
     closed = "closed"
 
 
+class LeadDetails(BaseModel):
+    """Lead attributes beyond the call-desk basics, stored under `contact["lead"]`.
+    Only what the lead sheet carries and the call or research uses - the CRM's
+    own workflow fields (owner, assignment, status, follow-up ids) stay in the CRM."""
+
+    industries: ShortText = ""
+    employees_size: ShortText = ""
+    country: ShortText = ""
+    branch: ShortText = ""
+    source: ShortText = ""
+    priority: ShortText = ""
+
+
 class ContactCreate(BaseModel):
     name: str
     phone: str
     secondary_phone: str = ""
     company: str = ""
+    website: UrlText = ""
     status: ContactStatus = ContactStatus.new
     notes: str = ""
+    lead: LeadDetails = Field(default_factory=LeadDetails)
 
 
 class ContactUpdate(BaseModel):
@@ -25,8 +45,13 @@ class ContactUpdate(BaseModel):
     phone: Optional[str] = None
     secondary_phone: Optional[str] = None
     company: Optional[str] = None
+    website: UrlText | None = None
     status: Optional[ContactStatus] = None
     notes: Optional[str] = None
+    # Only the lead fields actually sent are written (see
+    # domain.leads.mapping.contact_update_fields), so editing a few fields
+    # never wipes the rest of the ERP-owned data.
+    lead: LeadDetails | None = None
 
 
 class ContactResponse(BaseModel):
@@ -35,8 +60,10 @@ class ContactResponse(BaseModel):
     phone: str
     secondary_phone: str = ""
     company: str
+    website: str = ""
     status: ContactStatus
     notes: str
+    lead: LeadDetails = Field(default_factory=LeadDetails)
     last_called: Optional[datetime] = None
     assigned_to: Optional[str] = None
     created_at: datetime
@@ -94,6 +121,15 @@ class ClientUploadResult(BaseModel):
     updated: int
     skipped: int
     errors: list[ClientUploadRowError] = []
+
+
+class ProjectImportResult(BaseModel):
+    total_rows: int
+    imported: int
+    updated: int
+    skipped: int
+    errors: list[ClientUploadRowError] = []
+    warnings: list[ClientUploadRowError] = []  # imported, but something was adjusted (e.g. unknown domain)
 
 
 class ProcessingStatus(str, Enum):
@@ -188,3 +224,39 @@ class TwilioNumberResponse(BaseModel):
     is_active: bool
     assigned_users: list[AssignedUserSummary] = []
     created_at: datetime
+
+
+class LeadResearchStartRequest(BaseModel):
+    force: bool = False  # re-run even when a fresh brief exists
+
+
+class ResearchStep(BaseModel):
+    name: str
+    status: Literal["pending", "running", "done", "failed"] = "pending"
+
+
+class ResearchSource(BaseModel):
+    url: str
+    title: str = ""
+    fetched_at: datetime | None = None
+
+
+class LeadResearchResponse(BaseModel):
+    contact_id: str
+    status: Literal["none", "needs_website", "queued", "running", "done", "failed"] = "none"
+    website: str = ""
+    steps: list[ResearchStep] = []
+    error: str = ""
+    brief: LeadBrief | None = None
+    sources: list[ResearchSource] = []
+    posture: dict | None = None
+    is_stale: bool = False  # the brief is older than the cache window
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    updated_at: datetime | None = None
+
+
+class LeadResearchStatusItem(BaseModel):
+    contact_id: str
+    status: str
+    updated_at: datetime | None = None

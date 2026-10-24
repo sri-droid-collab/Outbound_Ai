@@ -10,9 +10,10 @@ backend/uploads/
 .DS_Store
 .claude/
 
-# Internal AI-assisted-dev process docs - local reference only, not published
-/CLAUDE.md
-/CODING_STANDARDS.md
-/SESSION_LOG.md
-/MANUAL_TEST_PLAN.md
-REFACTOR_PROMPT.md
+# Markdown: only README.md files are committed. Plans, process docs and AI-assistant
+# instructions (CLAUDE.md, CODING_STANDARDS.md, *_PLAN.md, ...) stay local.
+*.md
+!README.md
+
+# Excel/Office temporary lock files (created while a workbook is open)
+~$*.xlsx

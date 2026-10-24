@@ -39,8 +39,10 @@ async def _classify_domain_from_text(details: str, provider_name: str | None = N
     the client just said about their own need)."""
     provider = get_provider(provider_name)
     messages = build_classify_messages(details, CANONICAL_DOMAINS)
+    # Generous on purpose: Groq's reasoning models count hidden reasoning tokens against
+    # max_tokens, and at 200 some inputs ran out before any JSON was written.
     result = await provider.complete_structured(
-        messages, DomainClassification, model=_model_for(provider), temperature=0.1, max_tokens=200
+        messages, DomainClassification, model=_model_for(provider), temperature=0.1, max_tokens=1000
     )
     return {"domain": result.domain, "related_domains": result.related_domains}
 

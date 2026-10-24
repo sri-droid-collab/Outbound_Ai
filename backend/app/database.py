@@ -12,10 +12,15 @@ clients_collection = db["clients"]
 projects_collection = db["projects"]
 users_collection = db["users"]
 twilio_numbers_collection = db["twilio_numbers"]
+lead_research_collection = db["lead_research"]
 
 
 async def ensure_indexes():
     """Create indexes for the new collections. Called once on app startup."""
+    # Unique: one research document per contact. The repository's atomic
+    # claim() relies on this to stop two clicks starting two runs.
+    await lead_research_collection.create_index("contact_id", unique=True)
+    await lead_research_collection.create_index("status")
     await clients_collection.create_index("phone")
     await clients_collection.create_index("domain")
     await clients_collection.create_index("contact_id")

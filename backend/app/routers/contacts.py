@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.core.security import get_current_user
 from app.core.timezone import get_request_timezone, to_tz
+from app.domain.leads.mapping import contact_update_fields
 from app.models.schemas import ContactCreate, ContactResponse, ContactUpdate
 from app.repositories.contacts_repo import contacts_repo
 
@@ -18,8 +19,10 @@ def serialize_contact(doc, tz_name: str = "UTC") -> dict:
         "phone": doc["phone"],
         "secondary_phone": doc.get("secondary_phone", ""),
         "company": doc.get("company", ""),
+        "website": doc.get("website", ""),
         "status": doc.get("status", "new"),
         "notes": doc.get("notes", ""),
+        "lead": doc.get("lead") or {},
         "last_called": to_tz(doc.get("last_called"), tz_name),
         "assigned_to": doc.get("assigned_to"),
         "created_at": to_tz(doc.get("created_at", datetime.utcnow()), tz_name),
@@ -50,7 +53,7 @@ async def create_contact(contact: ContactCreate, tz_name: str = Depends(get_requ
 async def update_contact(
     contact_id: str, contact: ContactUpdate, tz_name: str = Depends(get_request_timezone)
 ):
-    update_data = {k: v for k, v in contact.model_dump().items() if v is not None}
+    update_data = contact_update_fields(contact)
     if not update_data:
         raise HTTPException(status_code=400, detail="No fields to update")
     result = await contacts_repo.find_one_and_update(

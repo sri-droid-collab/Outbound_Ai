@@ -9,6 +9,7 @@ import { domainStyle } from '../../../shared/utils/domainColors';
 import {
   getProjects,
   uploadProject,
+  importProjectsExcel,
   deleteProject as deleteProjectRequest,
   reprocessProject as reprocessProjectRequest,
 } from '../api';
@@ -24,6 +25,12 @@ const STATUS_CHIP = {
   completed: { style: 'bg-emerald-50 text-emerald-600', label: 'Processed' },
   failed: { style: 'bg-red-50 text-red-600', label: 'Failed' },
 };
+
+const EXCEL_EXTENSIONS = ['xlsx', 'xlsm'];
+const MAX_EXCEL_BYTES = 5 * 1024 * 1024;
+
+// Excel-imported projects have no stored file, so show where they came from instead of a size.
+const sourceLabel = (p) => (p.file_type === 'xlsx' ? `${p.file_name} · Excel import` : `${p.file_name} · ${formatSize(p.file_size)}`);
 
 const formatSize = (bytes) => (bytes >= 1024 * 1024 ? `${(bytes / 1024 / 1024).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1024))} KB`);
 
@@ -83,11 +90,42 @@ export default function ProjectsPanel() {
     setTimeout(() => setBanner(null), 6000);
   };
 
+  const importExcel = async (file) => {
+    if (file.size > MAX_EXCEL_BYTES) {
+      showBanner('error', 'File is too large. Maximum size for an Excel sheet is 5 MB.');
+      return;
+    }
+    setUploading(true);
+    try {
+      const { ok, data } = await importProjectsExcel(file);
+      if (!ok) {
+        showBanner('error', data.detail || 'Import failed. Please try again.');
+        return;
+      }
+      const note = data.errors?.[0]?.message || data.warnings?.[0]?.message;
+      showBanner(
+        data.imported + data.updated > 0 ? 'success' : 'error',
+        `${data.imported} imported, ${data.updated} updated, ${data.skipped} skipped.${note ? ` Row ${(data.errors?.[0] || data.warnings[0]).row}: ${note}` : ''}`,
+      );
+      fetchProjects();
+    } catch (err) {
+      console.error(err);
+      showBanner('error', 'Import failed. Check your connection and try again.');
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   const uploadFile = async (file) => {
     if (!file || uploading) return;
     const ext = file.name.toLowerCase().split('.').pop();
+    if (EXCEL_EXTENSIONS.includes(ext)) {
+      await importExcel(file);
+      return;
+    }
     if (!['pdf', 'doc', 'docx'].includes(ext)) {
-      showBanner('error', 'Unsupported file type. Please upload a PDF or Word document (.pdf, .doc, .docx).');
+      showBanner('error', 'Unsupported file type. Please upload a PDF or Word document, or an Excel sheet (.xlsx).');
       return;
     }
     if (file.size > 20 * 1024 * 1024) {
@@ -229,7 +267,7 @@ export default function ProjectsPanel() {
             <input
               ref={fileInputRef}
               type="file"
-              accept=".pdf,.doc,.docx"
+              accept=".pdf,.doc,.docx,.xlsx,.xlsm"
               className="hidden"
               style={{ display: 'none' }}
               onChange={(e) => uploadFile(e.target.files?.[0])}
@@ -238,14 +276,14 @@ export default function ProjectsPanel() {
               {uploading ? <Loader2 className="w-6 h-6 text-blue-500 animate-spin" /> : <Upload className="w-6 h-6 text-blue-500 anim-float" />}
             </div>
             <p className="text-[16px] font-bold text-gray-800 mb-1">
-              {uploading ? 'Uploading...' : 'Drop a project document here'}
+              {uploading ? 'Uploading...' : 'Drop a project document or Excel sheet here'}
             </p>
             <p className="text-[13px] text-gray-400">
-              or click to browse — PDF, DOC, DOCX up to 20 MB
+              or click to browse — PDF, DOC, DOCX up to 20 MB, or an .xlsx sheet (one project per row) up to 5 MB
             </p>
             <p className="text-[12px] text-gray-400 mt-3 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-violet-400" />
-              The AI agent extracts the domain, tech stack, and summary automatically after upload.
+              Documents are analyzed by the AI agent for domain, tech stack and summary; Excel rows are imported exactly as written.
             </p>
           </div>
 
@@ -262,7 +300,7 @@ export default function ProjectsPanel() {
                     <div className="flex-1 min-w-0">
                       <p className="text-[14px] font-semibold text-gray-800 truncate">{p.name}</p>
                       <p className="text-[12px] text-gray-400 truncate">
-                        {p.file_name} · {formatSize(p.file_size)} · {new Date(p.created_at).toLocaleDateString()}
+                        {sourceLabel(p)} · {new Date(p.created_at).toLocaleDateString()}
                       </p>
                       {p.processing_status === 'failed' && p.processing_error && (
                         <p className="text-[12px] text-red-500 mt-0.5">{p.processing_error}</p>
@@ -356,7 +394,7 @@ export default function ProjectsPanel() {
 
                       <div className="flex items-center justify-between mt-5 pt-4 border-t border-gray-100">
                         <p className="text-[12px] text-gray-400">
-                          {p.file_name} · {formatSize(p.file_size)} · uploaded {new Date(p.created_at).toLocaleDateString()}
+                          {sourceLabel(p)} · added {new Date(p.created_at).toLocaleDateString()}
                         </p>
                         <button onClick={() => deleteProject(p.id)} className="flex items-center gap-1.5 px-3 py-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg text-[12px] font-semibold transition-all">
                           <Trash2 className="w-3 h-3" />Delete

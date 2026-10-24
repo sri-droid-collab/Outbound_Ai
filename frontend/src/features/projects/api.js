@@ -26,6 +26,14 @@ export async function uploadProject(file) {
   return { ok: res.ok, data };
 }
 
+export async function importProjectsExcel(file) {
+  const body = new FormData();
+  body.append('file', file);
+  const res = await apiFetch('/projects/import-excel', { method: 'POST', body });
+  const data = await res.json();
+  return { ok: res.ok, data };
+}
+
 export async function deleteProject(id) {
   await apiFetch(`/projects/${id}`, { method: 'DELETE' });
 }

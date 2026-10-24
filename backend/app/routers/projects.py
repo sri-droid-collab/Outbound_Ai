@@ -4,6 +4,7 @@ import re
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile
@@ -12,7 +13,8 @@ from app.ai.agents.project_extraction_agent import process_project
 from app.ai.schemas.project_extraction import CANONICAL_DOMAINS
 from app.core.security import get_current_user
 from app.core.timezone import get_request_timezone, to_tz
-from app.models.schemas import ProjectResponse
+from app.domain.projects.excel_import import SheetFormatError, import_projects
+from app.models.schemas import ProjectImportResult, ProjectResponse
 from app.repositories.clients_repo import clients_repo
 from app.repositories.projects_repo import projects_repo
 from app.services.document_service import ALLOWED_EXTENSIONS, MAX_FILE_SIZE
@@ -22,6 +24,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/projects", tags=["projects"], dependencies=[Depends(get_current_user)])
 
 UPLOAD_DIR = Path(__file__).resolve().parent.parent.parent / "uploads" / "projects"
+MAX_EXCEL_SIZE = 5 * 1024 * 1024  # 5 MB
 
 
 def serialize_project(doc, tz_name: str = "UTC") -> dict:
@@ -79,6 +82,32 @@ async def upload_project(file: UploadFile = File(...), tz_name: str = Depends(ge
     asyncio.create_task(process_project(str(result.inserted_id)))
     logger.info(f"[PROJECTS] Uploaded '{doc['file_name']}' → processing started")
     return serialize_project(doc, tz_name)
+
+
+@router.post("/import-excel", response_model=ProjectImportResult)
+async def import_projects_excel(file: Annotated[UploadFile, File()]):
+    """Import projects from an Excel sheet (one project per row). Imported
+    projects are ready immediately - no AI processing step."""
+    filename = file.filename or "projects.xlsx"
+    ext = Path(filename).suffix.lower()
+    if ext == ".xls":
+        raise HTTPException(
+            status_code=400,
+            detail="Legacy .xls format is not supported. Please save the file as .xlsx and try again.",
+        )
+    if ext not in (".xlsx", ".xlsm"):
+        raise HTTPException(status_code=400, detail="Please upload an Excel file (.xlsx).")
+
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="The uploaded file is empty.")
+    if len(content) > MAX_EXCEL_SIZE:
+        raise HTTPException(status_code=400, detail="File too large. Maximum size is 5 MB.")
+
+    try:
+        return await import_projects(content, filename)
+    except SheetFormatError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from None
 
 
 @router.get("/", response_model=list[ProjectResponse])
@@ -147,8 +176,9 @@ async def delete_project(project_id: str):
 
     # Remove the stored file and any client references to this project
     try:
-        path = Path(doc.get("file_path", ""))
-        if path.exists():
+        # Excel-imported projects have no stored file (empty path, not a real one).
+        path = Path(doc["file_path"]) if doc.get("file_path") else None
+        if path and path.exists():
             path.unlink()
     except OSError as e:
         logger.warning(f"[PROJECTS] Could not delete file for {project_id}: {e}")

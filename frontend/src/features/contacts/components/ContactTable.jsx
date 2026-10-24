@@ -6,6 +6,11 @@ import {
 } from 'lucide-react';
 import { useDialer } from '../../calls/hooks/useDialer';
 import { getContacts, createContact, updateContact, deleteContact, uploadClientsExcel } from '../api';
+import LeadFields from './LeadFields';
+import { EMPTY_LEAD_FORM, PRIORITY_STYLES, leadFormFrom } from '../leadForm';
+import ResearchButton from '../../lead-research/components/ResearchButton';
+import ResearchPanel from '../../lead-research/components/ResearchPanel';
+import { useResearchStatuses } from '../../lead-research/hooks/useResearchStatuses';
 
 const STATUS_STYLES = {
   new: 'bg-blue-50 text-blue-600',
@@ -14,6 +19,8 @@ const STATUS_STYLES = {
   closed: 'bg-gray-100 text-gray-500',
 };
 const STATUS_LABELS = { new: 'New', called: 'Called', follow_up: 'Follow Up', closed: 'Closed' };
+
+const EMPTY_FORM = { name: '', phone: '', secondary_phone: '', company: '', website: '', notes: '', lead: EMPTY_LEAD_FORM };
 
 const COUNTRY_CODES = [
   { label: 'India (+91)', code: '+91' },
@@ -46,10 +53,10 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
   const [showAdd, setShowAdd] = useState(false);
   const [loading, setLoading] = useState(true);
   const [callingId, setCallingId] = useState(null);
-  const [form, setForm] = useState({ name: '', phone: '', secondary_phone: '', company: '', notes: '' });
+  const [form, setForm] = useState(EMPTY_FORM);
   const [callTarget, setCallTarget] = useState(null);
   const [editTarget, setEditTarget] = useState(null);
-  const [editForm, setEditForm] = useState({ name: '', phone: '', secondary_phone: '', company: '', notes: '', status: 'new' });
+  const [editForm, setEditForm] = useState({ ...EMPTY_FORM, status: 'new' });
   const [saving, setSaving] = useState(false);
   const [viewMode, setViewMode] = useState('table');
   const [showImport, setShowImport] = useState(false);
@@ -60,7 +67,9 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
   const [importCountryCode, setImportCountryCode] = useState('+91');
   const [selected, setSelected] = useState(new Set());
   const [showPowerCallConfirm, setShowPowerCallConfirm] = useState(false);
+  const [researchTarget, setResearchTarget] = useState(null);
   const { placeCall } = useDialer(makeCall);
+  const { statusByContact: researchStatus, refresh: refreshResearchStatuses } = useResearchStatuses();
 
   const fetchContacts = async () => {
     try { setContacts(await getContacts()); }
@@ -73,7 +82,7 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
     if (!form.name || !form.phone) return;
     try {
       const ok = await createContact(form);
-      if (ok) { setForm({ name: '', phone: '', secondary_phone: '', company: '', notes: '' }); setShowAdd(false); fetchContacts(); }
+      if (ok) { setForm(EMPTY_FORM); setShowAdd(false); fetchContacts(); }
     } catch (err) { console.error(err); }
   };
 
@@ -89,8 +98,10 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
       phone: contact.phone,
       secondary_phone: contact.secondary_phone || '',
       company: contact.company || '',
+      website: contact.website || '',
       notes: contact.notes || '',
       status: contact.status,
+      lead: leadFormFrom(contact.lead),
     });
   };
 
@@ -102,6 +113,21 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
       if (ok) { setEditTarget(null); fetchContacts(); }
     } catch (err) { console.error(err); }
     finally { setSaving(false); }
+  };
+
+  const closeResearch = () => { setResearchTarget(null); refreshResearchStatuses(); };
+
+  // Saves the website the research panel asked for, then refreshes the list so
+  // the new value is on the contact. Resolves to whether the save worked.
+  const saveResearchWebsite = async (contact, website) => {
+    try {
+      const ok = await updateContact(contact.id, { website });
+      if (ok) fetchContacts();
+      return ok;
+    } catch (err) {
+      console.error(err);
+      return false;
+    }
   };
 
   const confirmCall = async () => {
@@ -307,9 +333,15 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
               {contact.company && (
                 <p className="text-[13px] text-gray-500 mb-4 flex items-center gap-1.5">
                   <Building2 className="w-3 h-3" />{contact.company}
+                  {contact.lead?.priority && (
+                    <span className={`ml-auto px-2 py-0.5 rounded-md text-[11px] font-semibold ${PRIORITY_STYLES[contact.lead.priority] || PRIORITY_STYLES.Low}`}>
+                      {contact.lead.priority}
+                    </span>
+                  )}
                 </p>
               )}
               <div className="flex items-center gap-2 pt-3 border-t border-gray-100">
+                <ResearchButton status={researchStatus[contact.id]} onClick={() => setResearchTarget(contact)} />
                 <button
                   onClick={() => setCallTarget(contact)}
                   disabled={callingId === contact.id || !deviceReady || sessionActive}
@@ -340,6 +372,7 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
                 <th className="text-left px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Name</th>
                 <th className="text-left px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Phone</th>
                 <th className="text-left px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Company</th>
+                <th className="text-left px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Priority</th>
                 <th className="text-left px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Status</th>
                 <th className="text-left px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Last Called</th>
                 <th className="text-right px-6 py-3.5 text-[12px] font-bold text-gray-400 uppercase tracking-wider">Actions</th>
@@ -363,7 +396,17 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
                     {contact.phone}
                     {contact.secondary_phone && <div className="text-[11px] text-gray-300">alt: {contact.secondary_phone}</div>}
                   </td>
-                  <td className="px-6 py-3.5 text-[15px] text-gray-500">{contact.company || '—'}</td>
+                  <td className="px-6 py-3.5 text-[15px] text-gray-500">
+                    {contact.company || '—'}
+                    {contact.lead?.source && <div className="text-[11px] text-gray-300">{contact.lead.source}</div>}
+                  </td>
+                  <td className="px-6 py-3.5">
+                    {contact.lead?.priority ? (
+                      <span className={`px-2.5 py-0.5 rounded-md text-[12px] font-semibold ${PRIORITY_STYLES[contact.lead.priority] || PRIORITY_STYLES.Low}`}>
+                        {contact.lead.priority}
+                      </span>
+                    ) : <span className="text-gray-300">—</span>}
+                  </td>
                   <td className="px-6 py-3.5">
                     <span className={`px-2.5 py-0.5 rounded-md text-[12px] font-semibold ${STATUS_STYLES[contact.status]}`}>
                       {STATUS_LABELS[contact.status]}
@@ -374,6 +417,7 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
                   </td>
                   <td className="px-6 py-3.5">
                     <div className="flex items-center justify-end gap-1.5">
+                      <ResearchButton status={researchStatus[contact.id]} onClick={() => setResearchTarget(contact)} />
                       <button
                         onClick={() => setCallTarget(contact)}
                         disabled={callingId === contact.id || !deviceReady || sessionActive}
@@ -400,7 +444,7 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
       {/* Add Contact Modal */}
       {showAdd && createPortal(
         <div className="fixed inset-0 bg-gray-900/20 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-7 w-full max-w-md shadow-xl border border-gray-200 anim-modal">
+          <div className="bg-white rounded-2xl p-7 w-full max-w-md max-h-[90vh] overflow-y-auto shadow-xl border border-gray-200 anim-modal">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-[17px] font-bold text-gray-900">New Contact</h3>
               <button onClick={() => setShowAdd(false)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-all">
@@ -427,6 +471,12 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
                   />
                 </div>
               ))}
+              <LeadFields
+                website={form.website}
+                lead={form.lead}
+                onWebsiteChange={(website) => setForm({ ...form, website })}
+                onLeadChange={(lead) => setForm({ ...form, lead })}
+              />
               <div>
                 <label className="block text-[13px] font-semibold text-gray-500 mb-1.5">Notes</label>
                 <textarea
@@ -454,7 +504,7 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
       {/* Edit Contact Modal */}
       {editTarget && createPortal(
         <div className="fixed inset-0 bg-gray-900/20 backdrop-blur-sm flex items-center justify-center z-50">
-          <div className="bg-white rounded-2xl p-7 w-full max-w-md shadow-xl border border-gray-200 anim-modal">
+          <div className="bg-white rounded-2xl p-7 w-full max-w-md max-h-[90vh] overflow-y-auto shadow-xl border border-gray-200 anim-modal">
             <div className="flex items-center justify-between mb-6">
               <h3 className="text-[17px] font-bold text-gray-900">Edit Contact</h3>
               <button onClick={() => setEditTarget(null)} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded-lg transition-all">
@@ -481,6 +531,12 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
                   />
                 </div>
               ))}
+              <LeadFields
+                website={editForm.website}
+                lead={editForm.lead}
+                onWebsiteChange={(website) => setEditForm({ ...editForm, website })}
+                onLeadChange={(lead) => setEditForm({ ...editForm, lead })}
+              />
               <div>
                 <label className="block text-[13px] font-semibold text-gray-500 mb-1.5">Status</label>
                 <div className="flex flex-wrap gap-2">
@@ -539,8 +595,9 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
               </button>
             </div>
             <p className="text-[13px] text-gray-400 mb-5">
-              Expected columns: <span className="font-semibold text-gray-500">Client Name, Company Details, Project, Contact Number</span>.
-              Imported clients appear as contacts and are matched to relevant projects automatically.
+              Required columns: <span className="font-semibold text-gray-500">Lead Name, Mobile No</span>.
+              Optional: Company Name, Webpage, Secondary Phone, Industries, Employees Size, Country, Branch, Source, Priority, Project.
+              Imported leads appear as contacts and are matched to relevant projects automatically.
             </p>
 
             {!importResult && (
@@ -669,6 +726,17 @@ export default function ContactTable({ onCallContact, makeCall, deviceReady, onS
           </div>
         </div>,
         document.body
+      )}
+
+      {/* Lead research panel - closing it leaves the run going in the background */}
+      {researchTarget && (
+        <ResearchPanel
+          key={researchTarget.id}
+          contact={contacts.find((c) => c.id === researchTarget.id) || researchTarget}
+          onClose={closeResearch}
+          onSaveWebsite={saveResearchWebsite}
+          onStarted={refreshResearchStatuses}
+        />
       )}
 
       {/* Start Power Call Confirmation */}

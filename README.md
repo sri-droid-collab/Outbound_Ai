@@ -618,6 +618,7 @@ All endpoints below require a JWT (`Authorization: Bearer <token>`) except `/aut
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/projects/upload` | Upload a PDF/DOCX case study for AI extraction |
+| `POST` | `/projects/import-excel` | Import projects from an `.xlsx` sheet, one project per row (no AI step; ready immediately) |
 | `GET` | `/projects/` | List all projects |
 | `GET` | `/projects/{id}` | Get one project's full extracted metadata |
 | `GET` | `/projects/graph` | Projects grouped by domain (Knowledge Map) |
@@ -650,6 +651,44 @@ All endpoints below require a JWT (`Authorization: Bearer <token>`) except `/aut
 | `PUT` | `/contacts/{id}` | Update contact |
 | `DELETE` | `/contacts/{id}` | Delete contact |
 
+### Project Excel import
+
+**Projects → Upload** also accepts an `.xlsx` sheet (up to 5 MB) with one project per row. Imported projects
+are stored exactly as written and are ready immediately, then client matching is refreshed. Re-importing a
+sheet updates its projects in place by name; a name that already belongs to an uploaded document is skipped,
+never overwritten. Headers are matched case- and punctuation-insensitively.
+
+| Column | Required | Notes |
+|--------|----------|-------|
+| Project Name | yes | |
+| Summary, Technologies | one of them | |
+| Domain | no | One of the canonical domains (e.g. `Healthcare`, `Retail & E-Commerce`); unknown values are saved as `Other` with a warning |
+| Related Domains | no | Comma-separated canonical domains |
+| Business Problem, Solution Provided | no | Free text |
+| Key Features, AI/ML Components | no | One per line (or `;`-separated) |
+| Frontend, Backend, Database, Cloud / DevOps | no | Comma-separated; any technology listed in *Technologies* but in no group is kept under "other" |
+
+`backend/scripts/sample_projects.xlsx` is a ready example. `backend/scripts/build_projects_sheet.py <folder>`
+builds such a sheet from a folder of `.docx` profiles (read-only): it deduplicates the `Project Name:` entries
+across the files, extracts name, technologies and description, and takes domain, problem, solution and features
+from the curated table in the script. It copies project facts only, never names or contact details. Pair it with
+`sample_leads.xlsx`, whose leads are in industries those projects can be matched to.
+
+### Lead research — `/lead-research`
+
+Researches a lead's company from its public website and DNS email records, then stores a call-ready
+brief (summary, likely pain points with sources, opening line, questions). Runs as a background task,
+so closing the panel never stops it. All endpoints require a JWT.
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `POST` | `/lead-research/{contact_id}` | Start research (`202`). Returns the current run instead if one is active or a brief under 7 days old exists; `{"force": true}` re-runs. Status `needs_website` when the lead has no usable website. |
+| `GET` | `/lead-research/{contact_id}` | Current status, step progress and brief (`status: "none"` if never researched) |
+| `GET` | `/lead-research/` | Status of every researched lead, for the badges on the leads table |
+
+The crawler only fetches public `http(s)` sites, re-checks every redirect hop against private/loopback/
+link-local addresses, and honours `robots.txt`.
+
 ### WebSocket
 
 | Endpoint | Description |
@@ -670,13 +709,47 @@ All endpoints below require a JWT (`Authorization: Bearer <token>`) except `/aut
   "phone": "+1234567890",
   "secondary_phone": "+1234567891",
   "company": "Acme Corp",
+  "website": "acme.com (optional; the starting point for lead research)",
   "status": "new | called | follow_up | closed",
   "notes": "Interested in enterprise plan",
   "assigned_to": "user ObjectId or null - set to the first sales user who calls this contact",
+  "lead": {
+    "industries": "IT Services and IT Consulting",
+    "employees_size": "1,001-5,000 employees",
+    "country": "India",
+    "branch": "Chennai",
+    "source": "Linkedin-Sales",
+    "priority": "High"
+  },
   "last_called": "2026-03-15T10:30:00Z",
   "created_at": "2026-03-10T08:00:00Z"
 }
 ```
+
+`lead` holds the lead attributes beyond the call-desk basics, all optional (contacts created before it
+existed simply have none). Only what the lead sheet carries is kept; the CRM's own workflow fields (owner,
+assignment, status, follow-up ids) stay in the CRM. `domain.leads.mapping.contact_from_erp_lead()` converts a
+raw ERP Lead record into this shape (`lead_name` → `name`, `company_name` → `company`, `mobile_no` →
+`phone`, `webpage` → `website`).
+
+### Excel lead import
+
+**Contacts → Import Excel** reads the first sheet. Headers are matched case- and punctuation-insensitively.
+A ready-to-upload example lives at `backend/scripts/sample_leads.xlsx` (regenerate with
+`python scripts/make_sample_leads.py`; its phone numbers are all fictional).
+
+| Column | Required | Stored as |
+|--------|----------|-----------|
+| Lead Name | yes | `name` |
+| Mobile No | yes | `phone` (a second number in the same cell becomes `secondary_phone`) |
+| Company Name | no | `company` |
+| Webpage | no | `website` (what Lead Research starts from) |
+| Secondary Phone | no | `secondary_phone` |
+| Industries, Employees Size, Country, Branch, Source, Priority | no | `lead.*` (priority is normalised to High / Medium / Low) |
+| Project | no | a note, and used to match past projects |
+
+A lead whose phone is already in the database is updated: blank fields are filled, existing values are kept.
+The older `Client Name / Company Details / Project / Contact Number` headers still work.
 
 ### `call_logs` collection
 

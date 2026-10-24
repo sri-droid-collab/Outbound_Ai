@@ -10,6 +10,8 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from app.ai.agents.client_domain_agent import enrich_client
 from app.core.security import get_current_user
 from app.core.timezone import get_request_timezone, to_tz
+from app.domain.leads.mapping import extract_lead_fields
+from app.domain.spreadsheet import map_headers
 from app.models.schemas import ClientResponse, ClientUploadResult
 from app.repositories.clients_repo import clients_repo
 from app.repositories.contacts_repo import contacts_repo
@@ -24,10 +26,10 @@ MAX_ROWS = 1000
 # Accepted header spellings, normalized to lowercase alphanumerics.
 # The sheet must contain one match for each required field.
 HEADER_ALIASES = {
-    "name": {"clientname", "name", "client", "fullname"},
+    "name": {"clientname", "leadname", "name", "client", "fullname"},
     "company": {"companydetails", "company", "companyname", "organisation", "organization"},
     "project": {"project", "clientproject", "projectdetails", "projectname"},
-    "phone": {"contactnumber", "phone", "phonenumber", "contact", "mobile", "mobilenumber"},
+    "phone": {"contactnumber", "mobileno", "phone", "phonenumber", "contact", "mobile", "mobilenumber"},
     "secondary_phone": {
         "secondaryphone",
         "secondarynumber",
@@ -36,15 +38,28 @@ HEADER_ALIASES = {
         "phone2",
         "contactnumber2",
     },
+    # "domain" is deliberately not an alias: in these sheets it usually means
+    # the industry, not the web address.
+    "website": {"website", "webpage", "companywebsite", "websiteurl", "weburl", "companyurl", "url", "site"},
+    # Lead attributes, stored under contact["lead"] (see LeadDetails).
+    "industries": {"industries", "industry", "industrytype"},
+    "employees_size": {
+        "employeessize",
+        "employeesize",
+        "companysize",
+        "employees",
+        "noofemployees",
+        "headcount",
+    },
+    "country": {"country"},
+    "branch": {"branch"},
+    "source": {"source", "leadsource"},
+    "priority": {"priority"},
 }
 REQUIRED_FIELDS = {"name", "phone"}
 
 # Cells that pack more than one number together get split on these.
 _PHONE_SPLIT_RE = re.compile(r"[;,\n]+")
-
-
-def _normalize_header(value) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value or "").lower())
 
 
 def _normalize_phone(value, default_country_code: str = "") -> str:
@@ -95,17 +110,6 @@ def _extract_phones(values_by_field: dict, default_country_code: str = "") -> tu
     return primary, secondary
 
 
-def _map_headers(header_row, aliases: dict) -> dict:
-    """Map column index -> field name using the given alias table."""
-    mapping = {}
-    for idx, cell in enumerate(header_row):
-        normalized = _normalize_header(cell)
-        for field, field_aliases in aliases.items():
-            if normalized in field_aliases and field not in mapping.values():
-                mapping[idx] = field
-    return mapping
-
-
 def serialize_client(doc, tz_name: str = "UTC") -> dict:
     return {
         "id": str(doc["_id"]),
@@ -129,6 +133,7 @@ async def _upsert_contact(row: dict) -> str:
     existing = await contacts_repo.find_one({"phone": row["phone"]})
     note = f"Client project: {row['project']}" if row["project"] else ""
     secondary_phone = row.get("secondary_phone", "")
+    lead = row.get("lead", {})
     if existing:
         update = {}
         if not existing.get("company") and row["company"]:
@@ -137,6 +142,12 @@ async def _upsert_contact(row: dict) -> str:
             update["notes"] = note
         if not existing.get("secondary_phone") and secondary_phone:
             update["secondary_phone"] = secondary_phone
+        if not existing.get("website") and row.get("website"):
+            update["website"] = row["website"]
+        existing_lead = existing.get("lead") or {}
+        for field, value in lead.items():
+            if not existing_lead.get(field):
+                update[f"lead.{field}"] = value
         if update:
             await contacts_repo.update_one({"_id": existing["_id"]}, {"$set": update})
         return str(existing["_id"])
@@ -147,8 +158,10 @@ async def _upsert_contact(row: dict) -> str:
             "phone": row["phone"],
             "secondary_phone": secondary_phone,
             "company": row["company"],
+            "website": row.get("website", ""),
             "status": "new",
             "notes": note,
+            "lead": lead,
             "last_called": None,
             "created_at": datetime.utcnow(),
         }
@@ -199,15 +212,16 @@ async def upload_clients(file: UploadFile = File(...), country_code: str = Form(
     if not rows:
         raise HTTPException(status_code=400, detail="The Excel sheet is empty.")
 
-    header_map = _map_headers(rows[0], HEADER_ALIASES)
+    header_map = map_headers(rows[0], HEADER_ALIASES)
     mapped_fields = set(header_map.values())
     missing = REQUIRED_FIELDS - mapped_fields
     if missing:
-        pretty = {"name": "Client Name", "phone": "Contact Number"}
+        pretty = {"name": "Lead Name", "phone": "Mobile No"}
         raise HTTPException(
             status_code=400,
             detail=f"Missing required column(s): {', '.join(pretty[f] for f in sorted(missing))}. "
-            "Expected columns: Client Name, Company Details, Project, Contact Number.",
+            "Required: Lead Name, Mobile No. Optional: Company Name, Webpage, Secondary Phone, Industries, "
+            "Employees Size, Country, Branch, Source, Priority, Project.",
         )
 
     data_rows = []
@@ -223,6 +237,8 @@ async def upload_clients(file: UploadFile = File(...), country_code: str = Form(
                 "project": str(values_by_field.get("project") or "").strip(),
                 "phone": primary,
                 "secondary_phone": secondary,
+                "website": str(values_by_field.get("website") or "").strip()[:2000],
+                "lead": extract_lead_fields(values_by_field),
             }
         )
 
@@ -263,7 +279,9 @@ async def upload_clients(file: UploadFile = File(...), country_code: str = Form(
             else:
                 result = await clients_repo.insert_one(
                     {
-                        **row,
+                        **{
+                            k: v for k, v in row.items() if k != "lead"
+                        },  # lead attributes live on the contact
                         "contact_id": contact_id,
                         "domain": None,
                         "related_domains": [],

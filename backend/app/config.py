@@ -35,6 +35,15 @@ class Settings(BaseSettings):
     suggestion_agent_enabled: bool = True
     base_url: str = "http://localhost:8080"
 
+    # Lead research: runs in-process alongside live call audio, so the
+    # concurrency cap is what keeps a batch of research from starving a call.
+    lead_research_max_concurrent: int = 2
+    lead_research_cache_days: int = 7
+    lead_research_job_timeout_seconds: float = 150.0
+    lead_research_fetch_timeout_seconds: float = 10.0
+    lead_research_max_pages: int = 5
+    lead_research_user_agent: str = "OutboundAI-LeadResearch/1.0 (+business research; respects robots.txt)"
+
     jwt_secret_key: str = "change-this-secret-key"
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 720

@@ -15,6 +15,7 @@ export default defineConfig({
       '/contacts': 'http://localhost:8080',
       '/clients': 'http://localhost:8080',
       '/projects': 'http://localhost:8080',
+      '/lead-research': 'http://localhost:8080',
       // ws:true so Twilio's Media Stream (wss://.../calls/media-stream/:id)
       // upgrades through to the backend, not just plain HTTP webhooks.
       '/calls': {
