@@ -110,3 +110,55 @@ async def test_unreadable_homepage_returns_empty_result_with_gap():
 
     assert result.pages == []
     assert result.gaps == ["Homepage could not be read (http_503)"]
+
+
+MARKETING = "Our services and solutions help your company team about industry news press product leadership"
+
+
+def test_card_text_stuffed_with_keywords_does_not_outrank_a_careers_link():
+    links = [
+        ("https://acme.com/case-study/one", MARKETING),
+        ("https://acme.com/case-study/two", MARKETING),
+        ("https://acme.com/case-study/three", MARKETING),
+        ("https://acme.com/careers", "Careers"),
+    ]
+
+    picked = pick_pages(links, "https://acme.com/", limit=2)
+
+    assert "https://acme.com/careers" in picked
+
+
+def test_a_careers_page_gets_a_slot_even_when_better_scoring_pages_fill_the_budget():
+    links = [
+        ("https://acme.com/about", "About"),
+        ("https://acme.com/services", "Services"),
+        ("https://acme.com/solutions", "Solutions"),
+        ("https://acme.com/company", "Company"),
+        ("https://acme.com/join-us", "Join us"),
+    ]
+
+    picked = pick_pages(links, "https://acme.com/", limit=3)
+
+    assert len(picked) == 3 and "https://acme.com/join-us" in picked
+    assert picked[0] in {"https://acme.com/about", "https://acme.com/services"}  # the best pages stay first
+
+
+def test_without_a_careers_link_the_best_pages_are_unchanged():
+    links = [("https://acme.com/about", "About"), ("https://acme.com/services", "Services")]
+
+    assert set(pick_pages(links, "https://acme.com/", limit=2)) == {
+        "https://acme.com/about",
+        "https://acme.com/services",
+    }
+
+
+def test_a_hint_in_the_url_beats_the_same_hint_only_in_link_text():
+    links = [("https://acme.com/x/1", "About"), ("https://acme.com/about", "More")]
+
+    assert pick_pages(links, "https://acme.com/", limit=1) == ["https://acme.com/about"]
+
+
+def test_a_single_page_budget_is_not_forced_to_be_careers():
+    links = [("https://acme.com/about", "About"), ("https://acme.com/careers", "Careers")]
+
+    assert len(pick_pages(links, "https://acme.com/", limit=1)) == 1

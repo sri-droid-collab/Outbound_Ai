@@ -13,6 +13,7 @@ projects_collection = db["projects"]
 users_collection = db["users"]
 twilio_numbers_collection = db["twilio_numbers"]
 lead_research_collection = db["lead_research"]
+research_cache_collection = db["research_cache"]
 
 
 async def ensure_indexes():
@@ -21,6 +22,11 @@ async def ensure_indexes():
     # claim() relies on this to stop two clicks starting two runs.
     await lead_research_collection.create_index("contact_id", unique=True)
     await lead_research_collection.create_index("status")
+    # Per-source cache for rate-limited public sources (news, Wikidata). Mongo deletes a document
+    # once expires_at passes; the repository also checks it, since that sweep runs only about
+    # once a minute.
+    await research_cache_collection.create_index([("source", 1), ("key", 1)], unique=True)
+    await research_cache_collection.create_index("expires_at", expireAfterSeconds=0)
     await clients_collection.create_index("phone")
     await clients_collection.create_index("domain")
     await clients_collection.create_index("contact_id")

@@ -10,11 +10,12 @@ from dataclasses import dataclass, field
 
 from app.ai.prompts.lead_research_prompts import (
     build_brief_messages,
+    build_findings_block,
     build_projects_block,
     build_sources_block,
 )
 from app.ai.providers.factory import get_provider
-from app.ai.schemas.lead_research import LeadBrief
+from app.ai.schemas.lead_research import LeadBrief, ResearchFindings
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -30,6 +31,8 @@ class ResearchEvidence:
     pages: list[dict] = field(default_factory=list)  # {url, title, description, text}
     email_setup: str | None = None
     projects: list[dict] = field(default_factory=list)
+    findings: ResearchFindings | None = None
+    allowed_sources: set[str] = field(default_factory=set)  # every URL a claim may cite, from merge_validate
 
 
 def _model_for(provider) -> str:
@@ -45,7 +48,7 @@ def ground_brief(brief: LeadBrief, evidence: ResearchEvidence) -> tuple[LeadBrie
     """Remove pain points that cite a URL we never fetched and project
     recommendations that aren't in our portfolio. Returns the cleaned brief and
     how many claims were dropped (also noted in `gaps` so the rep can see it)."""
-    allowed = {_url_key(p["url"]) for p in evidence.pages}
+    allowed = {_url_key(p["url"]) for p in evidence.pages} | {_url_key(u) for u in evidence.allowed_sources}
     if evidence.email_setup:
         allowed.add(_url_key(f"dns:{evidence.domain}"))
     kept = [p for p in brief.pain_points if _url_key(p.source_url) in allowed]
@@ -73,6 +76,8 @@ async def generate_brief(evidence: ResearchEvidence, provider_name: str | None =
         crm_hints=evidence.crm_hints,
         sources_block=build_sources_block(evidence.pages, evidence.email_setup, evidence.domain),
         projects_block=build_projects_block(evidence.projects),
+        findings_block=build_findings_block(evidence.findings, evidence.domain),
+        conflicts=evidence.findings.conflicts if evidence.findings else (),
     )
     brief = await provider.complete_structured(
         messages, LeadBrief, model=_model_for(provider), temperature=0.2, max_tokens=1800

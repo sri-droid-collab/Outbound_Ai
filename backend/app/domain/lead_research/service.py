@@ -5,9 +5,13 @@ itself runs as a background task, reporting progress by updating the stored
 document, which is all the frontend polls. A research run is therefore
 independent of the browser tab that started it.
 
-Phase 1 pipeline: read the site + check email DNS (in parallel), match our
-past projects, write the brief. Failed or slow sources never abort a run
-unless the website itself is unreadable.
+Pipeline (fan-out, fan-in):
+  1. In parallel, each time-boxed: read the site, check email DNS, find news, look up Wikidata.
+  2. From the crawl: detect technology, find IT hiring signals.
+  3. merge_validate: combine, attach sources, record gaps, flag conflicts.
+  4. Match our past projects, write the brief from all of it.
+A failed or slow source becomes a gap in the brief, never a failed run - except an unreadable
+website, since without it there is nothing to write about.
 """
 
 import asyncio
@@ -19,37 +23,44 @@ from app.ai.agents.client_domain_agent import (
     match_projects_from_description,
 )
 from app.ai.agents.lead_research_agent import ResearchEvidence, generate_brief
-from app.ai.tools.lead_research.dns_posture import lookup_posture
+from app.ai.tools.lead_research.news_feeds import NEWS_HOSTS
 from app.ai.tools.lead_research.page_fetcher import PageFetcher
-from app.ai.tools.lead_research.site_crawler import CrawlResult, crawl_site
+from app.ai.tools.lead_research.public_api import PublicApiClient
+from app.ai.tools.lead_research.site_crawler import CrawlResult
 from app.ai.tools.lead_research.url_safety import normalize_website, site_domain
+from app.ai.tools.lead_research.wikidata import WIKIDATA_HOSTS
 from app.config import get_settings
+from app.domain.lead_research.collectors import (
+    Collected,
+    collect_email_dns,
+    collect_jobs,
+    collect_news,
+    collect_registry,
+    collect_site,
+    collect_tech,
+    guarded,
+)
+from app.domain.lead_research.merge import merge_findings
 from app.repositories.contacts_repo import contacts_repo
 from app.repositories.lead_research_repo import ACTIVE_STATUSES, lead_research_repo
+from app.repositories.source_cache_repo import source_cache_repo
 
 logger = logging.getLogger(__name__)
 
-STEP_ORDER = ("fetch_site", "check_email_setup", "match_projects", "write_brief")
+STEP_ORDER = (
+    "fetch_site",
+    "check_email_setup",
+    "find_news",
+    "check_registry",
+    "detect_tech",
+    "find_jobs",
+    "merge_findings",
+    "match_projects",
+    "write_brief",
+)
 
 _background_tasks: set[asyncio.Task] = set()
 _slots: asyncio.Semaphore | None = None
-
-
-_FETCH_ERROR_REASONS = {
-    "host_not_found": "that website address doesn't exist",
-    "unsafe_address": "that address isn't a public website",
-    "blocked_by_robots": "the site asks automated tools not to read it",
-    "timeout": "the site took too long to respond",
-    "network_error": "the connection failed",
-    "not_html": "it isn't a normal web page",
-    "too_many_redirects": "it redirects in a loop",
-}
-
-
-def _fetch_error_reason(code: str) -> str:
-    if code.startswith("http_"):
-        return f"the site returned an error ({code[5:]})"
-    return _FETCH_ERROR_REASONS.get(code, "no pages were readable")
 
 
 class LeadNotFoundError(Exception):
@@ -186,6 +197,25 @@ async def _tracked(contact_id: str, name: str, work):
     return result
 
 
+_STEP_STATE = {"failed": "failed", "skipped": "skipped"}
+
+
+async def _collect(contact_id: str, step: str, source: str, work, timeout: float) -> Collected:
+    """Run one collector as a tracked step. A failed or skipped source is reflected in its
+    step state but never raises - the run carries on without it."""
+    await _step(contact_id, step, "running")
+    collected = await guarded(source, work, timeout)
+    await _step(contact_id, step, _STEP_STATE.get(collected.status.status, "done"))
+    return collected
+
+
+def _api_user_agent(settings) -> str:
+    """Wikimedia blocks clients it can't contact, so the contact (when configured) goes in the User-Agent."""
+    if settings.lead_research_contact:
+        return f"OutboundAI-LeadResearch/1.0 ({settings.lead_research_contact}; business research)"
+    return settings.lead_research_user_agent
+
+
 async def _execute(contact_id: str) -> None:
     settings = get_settings()
     contact = await contacts_repo.get_by_id(contact_id)
@@ -195,27 +225,91 @@ async def _execute(contact_id: str) -> None:
 
     website = doc["website"]
     domain = site_domain(website)
+    company = contact.get("company", "")
+    lead = contact.get("lead") or {}
+    timeout = settings.lead_research_collector_timeout_seconds
 
-    async with PageFetcher(
-        user_agent=settings.lead_research_user_agent,
-        timeout=settings.lead_research_fetch_timeout_seconds,
-    ) as fetcher:
-        crawl, posture = await asyncio.gather(
-            _tracked(
-                contact_id, "fetch_site", crawl_site(website, fetcher, settings.lead_research_max_pages)
+    async with (
+        PageFetcher(
+            user_agent=settings.lead_research_user_agent, timeout=settings.lead_research_fetch_timeout_seconds
+        ) as fetcher,
+        PublicApiClient(
+            user_agent=_api_user_agent(settings),
+            timeout=settings.lead_research_fetch_timeout_seconds,
+            allowed_hosts=NEWS_HOSTS | WIKIDATA_HOSTS,
+        ) as api,
+    ):
+        # Fan-out: independent sources run side by side.
+        site, dns, news, registry = await asyncio.gather(
+            _collect(
+                contact_id,
+                "fetch_site",
+                "site",
+                collect_site(website, fetcher, settings.lead_research_max_pages),
+                settings.lead_research_job_timeout_seconds,
             ),
-            _tracked(contact_id, "check_email_setup", lookup_posture(domain)),
+            _collect(contact_id, "check_email_setup", "email_dns", collect_email_dns(domain), timeout),
+            _collect(
+                contact_id,
+                "find_news",
+                "news",
+                collect_news(
+                    api,
+                    source_cache_repo,
+                    company,
+                    gdelt_enabled=settings.lead_research_gdelt_enabled,
+                    ttl_seconds=settings.lead_research_news_cache_hours * 3600,
+                ),
+                timeout,
+            ),
+            _collect(
+                contact_id,
+                "check_registry",
+                "registry",
+                collect_registry(
+                    api if settings.lead_research_contact else None,
+                    source_cache_repo,
+                    company,
+                    domain,
+                    ttl_seconds=settings.lead_research_registry_cache_days * 86400,
+                ),
+                timeout,
+            ),
         )
-    if not crawl.pages:
-        await _step(contact_id, "fetch_site", "failed")
-        reason = _fetch_error_reason(crawl.home_error)
-        raise ResearchError(f"Could not read {domain}: {reason}. Check the website address and try again.")
+
+    crawl: CrawlResult | None = site.data
+    if crawl is None or not crawl.pages:
+        raise ResearchError(
+            f"Could not read {domain}: {site.status.note or 'no pages were readable'}. "
+            "Check the website address and try again."
+        )
+
+    # These read the crawl, so they run once it is in.
+    tech, jobs = await asyncio.gather(
+        _collect(contact_id, "detect_tech", "tech", collect_tech(crawl), timeout),
+        _collect(contact_id, "find_jobs", "jobs", collect_jobs(crawl), timeout),
+    )
+
+    # Fan-in.
+    await _step(contact_id, "merge_findings", "running")
+    merged = merge_findings(
+        domain=domain,
+        pages=crawl.pages,
+        tech=tech.data or [],
+        jobs=jobs.data,
+        news=news.data or [],
+        registry=registry.data,
+        statuses=[c.status for c in (site, dns, news, registry, tech, jobs)],
+        crm_employees=lead.get("employees_size", ""),
+    )
+    await _step(contact_id, "merge_findings", "done")
 
     projects = await _tracked(contact_id, "match_projects", _matching_projects(contact, crawl))
 
+    posture = dns.data
     evidence = ResearchEvidence(
         contact_name=contact["name"],
-        company=contact.get("company", ""),
+        company=company,
         website=website,
         domain=domain,
         crm_hints=_crm_hints(contact),
@@ -223,11 +317,13 @@ async def _execute(contact_id: str) -> None:
             {"url": p.url, "title": p.title, "description": p.description, "text": p.text}
             for p in crawl.pages
         ],
-        email_setup=posture.describe() if posture.mx or posture.spf or posture.dmarc else None,
+        email_setup=posture.describe() if posture and (posture.mx or posture.spf or posture.dmarc) else None,
         projects=projects,
+        findings=merged.findings,
+        allowed_sources=merged.allowed_sources,
     )
     brief = await _tracked(contact_id, "write_brief", generate_brief(evidence))
-    brief.gaps = list(dict.fromkeys([*crawl.gaps, *brief.gaps]))
+    brief.gaps = list(dict.fromkeys([*crawl.gaps, *merged.gaps, *brief.gaps]))
 
     await lead_research_repo.save(
         contact_id,
@@ -235,8 +331,9 @@ async def _execute(contact_id: str) -> None:
             "status": "done",
             "error": "",
             "brief": brief.model_dump(),
+            "findings": merged.findings.model_dump(),
             "sources": [{"url": p.url, "title": p.title, "fetched_at": p.fetched_at} for p in crawl.pages],
-            "posture": posture.as_dict(),
+            "posture": posture.as_dict() if posture else None,
             "completed_at": datetime.utcnow(),
         },
     )

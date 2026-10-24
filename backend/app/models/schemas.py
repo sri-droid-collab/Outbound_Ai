@@ -3,7 +3,7 @@ from typing import Annotated, Any, Literal, Optional
 from datetime import datetime
 from enum import Enum
 
-from app.ai.schemas.lead_research import LeadBrief
+from app.ai.schemas.lead_research import LeadBrief, ResearchFindings
 
 ShortText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=200)]
 UrlText = Annotated[str, StringConstraints(strip_whitespace=True, max_length=2000)]
@@ -232,7 +232,7 @@ class LeadResearchStartRequest(BaseModel):
 
 class ResearchStep(BaseModel):
     name: str
-    status: Literal["pending", "running", "done", "failed"] = "pending"
+    status: Literal["pending", "running", "done", "failed", "skipped"] = "pending"
 
 
 class ResearchSource(BaseModel):
@@ -248,6 +248,7 @@ class LeadResearchResponse(BaseModel):
     steps: list[ResearchStep] = []
     error: str = ""
     brief: LeadBrief | None = None
+    findings: ResearchFindings | None = None  # what each collector found, each tied to its source
     sources: list[ResearchSource] = []
     posture: dict | None = None
     is_stale: bool = False  # the brief is older than the cache window
